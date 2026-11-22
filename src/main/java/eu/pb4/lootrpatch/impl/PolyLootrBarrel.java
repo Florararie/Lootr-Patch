@@ -1,5 +1,10 @@
 package eu.pb4.lootrpatch.impl;
 
+import java.util.function.Consumer;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import eu.pb4.lootrpatch.LootrPolymerPatch;
 import eu.pb4.polymer.core.api.block.PolymerBlock;
 import eu.pb4.polymer.virtualentity.api.BlockWithElementHolder;
@@ -21,7 +26,7 @@ import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import noobanidus.mods.lootr.common.api.data.blockentity.ILootrBlockEntity;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 import org.jspecify.annotations.Nullable;
 
@@ -117,8 +122,7 @@ public record PolyLootrBarrel(Block block) implements PolymerBlock, BlockWithEle
         private final BlockPos pos;
         private final PolyLootrBarrel barrel;
         private final ItemDisplayElement element;
-        private String model;
-        private boolean opened;
+        private final PlayerDisplay models;
         private boolean open;
         private Direction facing;
         private int skyLight = -1;
@@ -129,10 +133,9 @@ public record PolyLootrBarrel(Block block) implements PolymerBlock, BlockWithEle
             this.pos = pos;
             this.barrel = barrel;
             this.facing = facing(state);
-            this.model = modelName(false, open(state));
             this.open = open(state);
 
-            this.element = new ItemDisplayElement(stack(this.model));
+            this.element = new ItemDisplayElement(stack(modelName(false, this.open)));
             this.element.setItemDisplayContext(ItemDisplayContext.NONE);
             this.element.setDisplaySize(1f, 1f);
             this.element.setViewRange(1.5f);
@@ -140,6 +143,7 @@ public record PolyLootrBarrel(Block block) implements PolymerBlock, BlockWithEle
             this.element.setInvisible(true);
             this.applyRotation();
             this.addElement(this.element);
+            this.models = new PlayerDisplay(this.element);
         }
 
         @Override
@@ -155,11 +159,15 @@ public record PolyLootrBarrel(Block block) implements PolymerBlock, BlockWithEle
 
             this.applyBrightness();
 
-            String model = modelName(isLooted(), open(state));
-            if (!model.equals(this.model)) {
-                this.model = model;
-                this.element.setItem(stack(model));
+            for (var watcher : this.getWatchingPlayers()) {
+                ServerPlayer player = watcher.getPlayer();
+                boolean looted = LootrOpenState.isLootedBy(this.world, this.pos, player);
+                this.show(player, looted, open(state));
+                if (!looted) {
+                    UnopenedParticles.sparkle(this.world, player, this.motePoint(), 0.25);
+                }
             }
+            this.models.retain(this.getWatchingPlayers());
 
             Direction facing = facing(state);
             if (facing != this.facing) {
@@ -204,9 +212,31 @@ public record PolyLootrBarrel(Block block) implements PolymerBlock, BlockWithEle
             this.element.setLeftRotation(this.facing == Direction.DOWN ? FLIPPED : UPRIGHT);
         }
 
-        private boolean isLooted() {
-            return this.world.getBlockEntity(this.pos) instanceof ILootrBlockEntity lootr
-                    && lootr.hasBeenOpened();
+        /**
+         * Gives one player the barrel as they should see it: silver once they have looted it, gold
+         * until then, with the lid as open as everyone sees it.
+         */
+        private void show(ServerPlayer player, boolean looted, boolean open) {
+            String name = modelName(looted, open);
+            Identifier model = model(name);
+            if (this.models.stale(player, model)) {
+                this.models.show(player, model, stack(name));
+            }
+        }
+
+        /** Where Lootr's unlooted motes start: across the lid, a little above the barrel. */
+        private Vec3 motePoint() {
+            return new Vec3(this.pos.getX() + 0.5, this.pos.getY() + 1.1, this.pos.getZ() + 0.5);
+        }
+
+        /** Sends a player who has just been given the barrel their own look with its spawn packet. */
+        @Override
+        protected void startWatchingExtraPackets(ServerGamePacketListenerImpl watcher,
+                                                 Consumer<Packet<ClientGamePacketListener>> bundle) {
+            ServerPlayer player = watcher.getPlayer();
+            boolean looted = LootrOpenState.isLootedBy(this.world, this.pos, player);
+            String name = modelName(looted, open(this.world.getBlockState(this.pos)));
+            this.models.show(player, model(name), stack(name), bundle);
         }
 
         private static Direction facing(BlockState state) {

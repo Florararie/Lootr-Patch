@@ -1,5 +1,10 @@
 package eu.pb4.lootrpatch.impl;
 
+import java.util.function.Consumer;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
+import net.minecraft.world.entity.player.Player;
 import eu.pb4.lootrpatch.LootrPolymerPatch;
 import eu.pb4.polymer.core.api.entity.PolymerEntity;
 import eu.pb4.polymer.core.api.entity.PolymerEntityUtils;
@@ -24,6 +29,7 @@ import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.server.level.ServerLevel;
 import noobanidus.mods.lootr.common.api.data.entity.ILootrEntity;
 import org.joml.Quaternionf;
 
@@ -175,9 +181,9 @@ public final class LootrItemFrames {
         return frame instanceof HangingEntity hanging ? hanging.getDirection() : Direction.NORTH;
     }
 
-    /** Lootr remembers on the frame itself whether it has been looted. */
-    private static boolean isLooted(Entity frame) {
-        return frame instanceof ILootrEntity lootr && lootr.hasBeenOpened();
+    /** Lootr remembers on the frame itself which players have looted it. */
+    private static boolean isLooted(Entity frame, Player player) {
+        return frame instanceof ILootrEntity lootr && lootr.hasVisualOpened(player);
     }
 
     /** A frame of the base item asked to draw one of the pack's frame bodies instead. */
@@ -191,15 +197,16 @@ public final class LootrItemFrames {
     private static final class FrameHolder extends ElementHolder {
         private final Entity frame;
         private final ItemDisplayElement element;
+        private final PlayerDisplay models;
         private Direction direction;
-        private boolean looted;
 
         FrameHolder(Entity frame) {
             this.frame = frame;
             this.direction = facing(frame);
-            this.looted = isLooted(frame);
 
-            this.element = new ItemDisplayElement(stack(this.looted));
+            // The constructed item is the unlooted border; each player is told their own look with
+            // their spawn, and again whenever it changes for them.
+            this.element = new ItemDisplayElement(stack(false));
             this.element.setItemDisplayContext(ItemDisplayContext.NONE);
             this.element.setDisplaySize(1f, 1f);
             this.element.setViewRange(1.5f);
@@ -207,9 +214,10 @@ public final class LootrItemFrames {
             this.element.setInvisible(true);
             this.place(this.direction);
             this.addElement(this.element);
+            this.models = new PlayerDisplay(this.element);
         }
 
-        /** Follows the frame's facing and its looted look; its position is the frame's own. */
+        /** Follows the frame's facing and each player's looted look; its position is the frame's own. */
         @Override
         protected void onTick() {
             if (this.frame.isRemoved()) {
@@ -222,11 +230,52 @@ public final class LootrItemFrames {
                 this.place(direction);
             }
 
-            boolean looted = isLooted(this.frame);
-            if (looted != this.looted) {
-                this.looted = looted;
-                this.element.setItem(stack(looted));
+            for (var watcher : this.getWatchingPlayers()) {
+                ServerPlayer player = watcher.getPlayer();
+                boolean looted = isLooted(this.frame, player);
+                this.show(player, looted);
+                if (!looted) {
+                    UnopenedParticles.sparkle((ServerLevel) this.frame.level(), player,
+                            this.motePoint(), this.moteSpreadX(), this.moteSpreadZ());
+                }
             }
+            this.models.retain(this.getWatchingPlayers());
+        }
+
+        /** Gives one player the border as they should see it: silver once they have looted the frame. */
+        private void show(ServerPlayer player, boolean looted) {
+            Identifier model = model(looted);
+            if (this.models.stale(player, model)) {
+                this.models.show(player, model, stack(looted));
+            }
+        }
+
+        /**
+         * Where Lootr's unlooted frame motes start: in front of the frame's face, a little above its
+         * middle.
+         */
+        private Vec3 motePoint() {
+            return new Vec3(this.frame.getX() + this.direction.getStepX() * 0.5,
+                    this.frame.getY() + this.direction.getStepY() * 0.5 + 0.4,
+                    this.frame.getZ() + this.direction.getStepZ() * 0.5);
+        }
+
+        /** How far across the frame's face its motes may start: a third of a block, as in Lootr. */
+        private double moteSpreadX() {
+            return this.direction.getAxis() == Direction.Axis.X ? 0 : 0.35;
+        }
+
+        private double moteSpreadZ() {
+            return this.direction.getAxis() == Direction.Axis.Z ? 0 : 0.35;
+        }
+
+        /** Sends a player who has just been given the frame their own border with its spawn packet. */
+        @Override
+        protected void startWatchingExtraPackets(ServerGamePacketListenerImpl watcher,
+                                                 Consumer<Packet<ClientGamePacketListener>> bundle) {
+            ServerPlayer player = watcher.getPlayer();
+            boolean looted = isLooted(this.frame, player);
+            this.models.show(player, model(looted), stack(looted), bundle);
         }
 
         /**

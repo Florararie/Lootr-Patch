@@ -1,5 +1,10 @@
 package eu.pb4.lootrpatch.impl;
 
+import java.util.function.Consumer;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import eu.pb4.lootrpatch.LootrPolymerPatch;
 import eu.pb4.polymer.core.api.block.PolymerBlock;
 import eu.pb4.polymer.virtualentity.api.BlockWithElementHolder;
@@ -17,6 +22,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
+import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -29,10 +35,11 @@ import org.jspecify.annotations.Nullable;
  * and a chest half. The lid animates by stepping that angle, one model per position, the way the
  * sibling chest patches do.
  *
- * <p>Lootr's opened sprite is per player in its own renderer, so it is shown here once the chest has
- * been looted by anyone: one display entity is shared by every player who can see the block, and the
- * chest it draws is the looted one from then on. Everything else - per-player loot, the menu, the
- * advancement, the decay - is unchanged and stays on the server.
+ * <p>Lootr's opened sprite is per player: a chest is gold to a player who has not opened it and
+ * silver to one who has. One display entity is shared by everyone who can see the block, so its item
+ * is not sent through the shared tracker; {@link PlayerDisplay} sends each player their own one.
+ * Everything else - per-player loot, the menu, the advancement, the decay - is unchanged and stays
+ * on the server.
  */
 public record PolyLootrChest(Block block, LootrBlocks.Chest chest)
         implements PolymerBlock, BlockWithElementHolder {
@@ -104,8 +111,7 @@ public record PolyLootrChest(Block block, LootrBlocks.Chest chest)
         private final BlockPos pos;
         private final PolyLootrChest chest;
         private final ItemDisplayElement element;
-        private Identifier model;
-        private boolean opened;
+        private final PlayerDisplay models;
         private int step;
         private float yaw;
 
@@ -119,8 +125,6 @@ public record PolyLootrChest(Block block, LootrBlocks.Chest chest)
             this.world = world;
             this.pos = pos;
             this.chest = chest;
-            this.opened = false;
-            this.model = model(chest.chest(), false, 0);
             this.yaw = FACING_YAW[facingIndex(state)];
 
             this.element = new ItemDisplayElement(chest.stack(false, 0));
@@ -131,6 +135,7 @@ public record PolyLootrChest(Block block, LootrBlocks.Chest chest)
             this.element.setInvisible(true);
             this.element.setYaw(this.yaw);
             this.addElement(this.element);
+            this.models = new PlayerDisplay(this.element);
         }
 
         /**
@@ -149,20 +154,20 @@ public record PolyLootrChest(Block block, LootrBlocks.Chest chest)
                 return;
             }
 
-            boolean opened = this.isLooted();
             int target = this.isOpen() ? OPEN_STEPS : 0;
-            int step = this.step;
-            if (step != target) {
-                step += Integer.signum(target - step);
+            if (this.step != target) {
+                this.step += Integer.signum(target - this.step);
             }
 
-            Identifier model = model(this.chest.chest(), opened, step);
-            if (step != this.step || opened != this.opened || !model.equals(this.model)) {
-                this.step = step;
-                this.opened = opened;
-                this.model = model;
-                this.element.setItem(this.chest.stack(opened, step));
+            for (var watcher : this.getWatchingPlayers()) {
+                ServerPlayer player = watcher.getPlayer();
+                boolean looted = LootrOpenState.isLootedBy(this.world, this.pos, player);
+                this.show(player, looted);
+                if (!looted) {
+                    UnopenedParticles.sparkle(this.world, player, this.motePoint(), 0.25);
+                }
             }
+            this.models.retain(this.getWatchingPlayers());
 
             float yaw = FACING_YAW[facingIndex(state)];
             if (yaw != this.yaw) {
@@ -171,8 +176,37 @@ public record PolyLootrChest(Block block, LootrBlocks.Chest chest)
             }
         }
 
-        private boolean isLooted() {
-            return LootrOpenState.isLooted(this.world, this.pos);
+        /**
+         * Gives one player the chest as they should see it: silver once they have looted it, gold
+         * until then, at the lid position that everyone shares.
+         */
+        private void show(ServerPlayer player, boolean looted) {
+            Identifier model = model(this.chest.chest(), looted, this.step);
+            if (this.models.stale(player, model)) {
+                this.models.show(player, model, this.chest.stack(looted, this.step));
+            }
+        }
+
+        /**
+         * Where Lootr's unlooted motes start: across the lid, a little under a block above the
+         * chest's own position.
+         */
+        private Vec3 motePoint() {
+            return new Vec3(this.pos.getX() + 0.5, this.pos.getY() + 0.95, this.pos.getZ() + 0.5);
+        }
+
+        /**
+         * Sends a player who has just been given the chest their own look, in the same bundle as its
+         * spawn packet: the display's constructed item is the unlooted one, which would be all they
+         * saw until the next tick.
+         */
+        @Override
+        protected void startWatchingExtraPackets(ServerGamePacketListenerImpl watcher,
+                                                 Consumer<Packet<ClientGamePacketListener>> bundle) {
+            ServerPlayer player = watcher.getPlayer();
+            boolean looted = LootrOpenState.isLootedBy(this.world, this.pos, player);
+            this.models.show(player, model(this.chest.chest(), looted, this.step),
+                    this.chest.stack(looted, this.step), bundle);
         }
 
         /**

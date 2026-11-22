@@ -2,9 +2,9 @@ package eu.pb4.lootrpatch.impl;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import noobanidus.mods.lootr.common.api.data.ILootrContainerInstance;
-import noobanidus.mods.lootr.common.api.data.blockentity.ILootrBlockEntity;
 
 /**
  * What Lootr's server-side block entity knows about a container, read the same way for every
@@ -40,8 +40,16 @@ final class LootrOpenState {
                 && !chest.getEntitiesWithContainerOpen().isEmpty();
     }
 
-    /** Lootr remembers in its block entity whether its container has been looted. */
-    static boolean isLooted(ServerLevel world, BlockPos pos) {
-        return world.getBlockEntity(pos) instanceof ILootrBlockEntity lootr && lootr.hasBeenOpened();
+    /**
+     * Whether one player has looted the container, which is the look that player is shown.
+     *
+     * <p>Lootr keeps this per player, and its own renderer draws from it: the container wears the
+     * gold sprite for a player who has not opened it and the silver one for a player who has.
+     * {@code hasVisualOpened} is that set, resolved through the player's team exactly as Lootr
+     * resolves it, and it is deliberately not {@code hasBeenOpened}: that one is shared, so it would
+     * turn the container silver for everyone as soon as one player looted it.
+     */
+    static boolean isLootedBy(ServerLevel world, BlockPos pos, Player player) {
+        return world.getBlockEntity(pos) instanceof ILootrContainerInstance lootr && lootr.hasVisualOpened(player);
     }
 }

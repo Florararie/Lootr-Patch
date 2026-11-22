@@ -1,5 +1,10 @@
 package eu.pb4.lootrpatch.impl;
 
+import java.util.function.Consumer;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.game.ClientGamePacketListener;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import eu.pb4.lootrpatch.LootrPolymerPatch;
 import eu.pb4.polymer.core.api.block.PolymerBlock;
 import eu.pb4.polymer.virtualentity.api.BlockWithElementHolder;
@@ -16,6 +21,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -73,15 +79,13 @@ public record PolyLootrShulker(Block block) implements PolymerBlock, BlockWithEl
         private final BlockPos pos;
         private final Block block;
         private final ItemDisplayElement element;
-        private Identifier model;
-        private boolean looted;
+        private final PlayerDisplay models;
         private int step;
 
         Holder(ServerLevel world, BlockPos pos, Block block) {
             this.world = world;
             this.pos = pos;
             this.block = block;
-            this.model = model(false, 0);
 
             this.element = new ItemDisplayElement(stack(false, 0));
             this.element.setItemDisplayContext(ItemDisplayContext.NONE);
@@ -92,6 +96,7 @@ public record PolyLootrShulker(Block block) implements PolymerBlock, BlockWithEl
             this.element.setTeleportDuration(0);
             this.element.setInvisible(true);
             this.addElement(this.element);
+            this.models = new PlayerDisplay(this.element);
         }
 
         /**
@@ -109,20 +114,45 @@ public record PolyLootrShulker(Block block) implements PolymerBlock, BlockWithEl
                 return;
             }
 
-            boolean looted = LootrOpenState.isLooted(this.world, this.pos);
             int target = LootrOpenState.isOpen(this.world, this.pos) ? PolyLootrChest.OPEN_STEPS : 0;
-            int step = this.step;
-            if (step != target) {
-                step += Integer.signum(target - step);
+            if (this.step != target) {
+                this.step += Integer.signum(target - this.step);
             }
 
-            Identifier model = model(looted, step);
-            if (step != this.step || looted != this.looted || !model.equals(this.model)) {
-                this.step = step;
-                this.looted = looted;
-                this.model = model;
-                this.element.setItem(stack(looted, step));
+            for (var watcher : this.getWatchingPlayers()) {
+                ServerPlayer player = watcher.getPlayer();
+                boolean looted = LootrOpenState.isLootedBy(this.world, this.pos, player);
+                this.show(player, looted);
+                if (!looted) {
+                    UnopenedParticles.sparkle(this.world, player, this.motePoint(), 0.25);
+                }
             }
+            this.models.retain(this.getWatchingPlayers());
+        }
+
+        /**
+         * Gives one player the box as they should see it: silver once they have looted it, gold
+         * until then, at the lid position everyone shares.
+         */
+        private void show(ServerPlayer player, boolean looted) {
+            Identifier model = model(looted, this.step);
+            if (this.models.stale(player, model)) {
+                this.models.show(player, model, stack(looted, this.step));
+            }
+        }
+
+        /** Where Lootr's unlooted motes start: across the lid, a little above the box. */
+        private Vec3 motePoint() {
+            return new Vec3(this.pos.getX() + 0.5, this.pos.getY() + 1.1, this.pos.getZ() + 0.5);
+        }
+
+        /** Sends a player who has just been given the box their own look with its spawn packet. */
+        @Override
+        protected void startWatchingExtraPackets(ServerGamePacketListenerImpl watcher,
+                                                 Consumer<Packet<ClientGamePacketListener>> bundle) {
+            ServerPlayer player = watcher.getPlayer();
+            boolean looted = LootrOpenState.isLootedBy(this.world, this.pos, player);
+            this.models.show(player, model(looted, this.step), stack(looted, this.step), bundle);
         }
     }
 }
